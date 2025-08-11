@@ -55,21 +55,82 @@ def load_or_create_keys(username: str):
     return private_key, public_key
 
 def fingerprint_of_public_pem(pem: str):
-    # Simple SHA-256 of the DER bytes
+    # Full SHA-256 of the DER bytes
     pub = serialization.load_pem_public_key(pem.encode(), backend=default_backend())
     der = pub.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
     digest = hashes.Hash(hashes.SHA256())
     digest.update(der)
     fp = digest.finalize()
-    # return shortened hex
-    return ":".join(f"{b:02x}" for b in fp[:8])
+    # return full hex for security, but display shortened version
+    return fp.hex()
+
+def fingerprint_display(full_hex: str):
+    """Display shortened version of fingerprint for user interface"""
+    return ":".join(f"{int(full_hex[i:i+2], 16):02x}" for i in range(0, 16, 2))
+
+def sign_challenge(private_key, challenge: str) -> str:
+    """Sign a challenge string with the private key using PSS padding"""
+    signature = private_key.sign(
+        challenge.encode(),
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.MAX_LENGTH
+        ),
+        hashes.SHA256()
+    )
+    return base64.b64encode(signature).decode()
 
 class Keyring:
-    def __init__(self):
+    def __init__(self, username: str):
+        self.username = username
         self.map = {}  # username -> {"public_pem": str, "fingerprint": str}
+        self.known_keys_file = KEYS_DIR / f"{username}_known_keys.json"
+        self.load_known_keys()
+
+    def load_known_keys(self):
+        """Load previously known keys from disk (TOFU persistence)"""
+        if self.known_keys_file.exists():
+            try:
+                with open(self.known_keys_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.map = data
+                    print(f"[TOFU] Cargadas {len(self.map)} claves conocidas")
+            except Exception as e:
+                print(f"[TOFU] Error cargando claves conocidas: {e}")
+
+    def save_known_keys(self):
+        """Save known keys to disk"""
+        KEYS_DIR.mkdir(exist_ok=True)
+        try:
+            with open(self.known_keys_file, 'w', encoding='utf-8') as f:
+                json.dump(self.map, f, indent=2)
+        except Exception as e:
+            print(f"[TOFU] Error guardando claves: {e}")
 
     def set(self, username, public_pem, fingerprint):
+        """Store a public key with TOFU validation"""
+        existing = self.map.get(username)
+        if existing:
+            if existing["fingerprint"] != fingerprint:
+                print(f"⚠️  [TOFU ALERT] ¡La clave de {username} ha cambiado!")
+                print(f"   Anterior: {fingerprint_display(existing['fingerprint'])}")
+                print(f"   Nueva:    {fingerprint_display(fingerprint)}")
+                print(f"   Esto podría indicar un ataque MITM o que {username} cambió su clave.")
+                
+                response = input(f"¿Aceptar nueva clave para {username}? [s/N]: ").strip().lower()
+                if response not in ['s', 'si', 'sí', 'y', 'yes']:
+                    print(f"[TOFU] Clave rechazada para {username}")
+                    return False
+                    
+                print(f"[TOFU] Clave actualizada para {username}")
+            else:
+                print(f"[TOFU] Clave confirmada para {username}")
+        else:
+            print(f"[TOFU] Nueva clave guardada para {username} (fp: {fingerprint_display(fingerprint)})")
+
         self.map[username] = {"public_pem": public_pem, "fingerprint": fingerprint}
+        self.save_known_keys()
+        return True
 
     def get_public_key(self, username):
         entry = self.map.get(username)
@@ -102,9 +163,9 @@ def main():
     my_public_pem = pem_public_key(public_key)
     my_fingerprint = fingerprint_of_public_pem(my_public_pem)
 
-    keyring = Keyring()
+    keyring = Keyring(username)
 
-    print(f"[{username}] fingerprint: {my_fingerprint}")
+    print(f"[{username}] fingerprint: {fingerprint_display(my_fingerprint)}")
     print(f"[client] conectando a {SERVER_HOST}:{SERVER_PORT} ...")
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((SERVER_HOST, SERVER_PORT))
@@ -114,7 +175,7 @@ def main():
         "type": "REGISTER",
         "username": username,
         "public_key": my_public_pem,
-        "fingerprint": my_fingerprint,
+        "fingerprint": my_fingerprint,  # Now full SHA-256
     })
 
     # Reader thread
@@ -130,17 +191,31 @@ def main():
                 continue
 
             t = msg.get("type")
-            if t == "REGISTERED":
+            if t == "CHALLENGE":
+                # Handle registration challenge
+                challenge = msg.get("challenge")
+                if challenge:
+                    print("[server] Respondiendo desafío de autenticación...")
+                    signature = sign_challenge(private_key, challenge)
+                    send_json(sock, {
+                        "type": "CHALLENGE_RESPONSE",
+                        "signature": signature
+                    })
+            elif t == "REGISTERED":
                 roster = msg.get("roster", [])
+                print(f"[server] ✅ Registrado exitosamente como {username}")
                 if roster:
-                    print("[server] usuarios conectados:",
-                          ", ".join(f'{r['"username"']}({r['"fingerprint"']})' for r in roster))
+                    print("[server] usuarios conectados:")
+                    for r in roster:
+                        print(f"  - {r['username']} (fp: {r['fingerprint']})")
                 else:
                     print("[server] no hay otros usuarios conectados.")
             elif t == "PUBLIC_KEY":
                 if msg.get("found"):
-                    keyring.set(msg["username"], msg["public_key"], msg["fingerprint"])
-                    print(f"[server] clave pública de {msg['username']} guardada (fp {msg['fingerprint']}).")
+                    if keyring.set(msg["username"], msg["public_key"], msg["fingerprint"]):
+                        print(f"[server] clave pública de {msg['username']} guardada")
+                    else:
+                        print(f"[server] clave pública de {msg['username']} rechazada por TOFU")
                 else:
                     print(f"[server] {msg['username']} no encontrado.")
             elif t == "ROOM_MSG":

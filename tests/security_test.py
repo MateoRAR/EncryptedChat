@@ -48,7 +48,7 @@ def test_from_spoofing():
         print(f"Registro: {response}")
         
         if response.get("type") == "CHALLENGE":
-            print("❌ Sin challenge-response, este ataque fallaría")
+            print("Sin challenge-response, este ataque fallaría")
             return
             
         # Intentar enviar PM como si fuera "alice"
@@ -63,9 +63,9 @@ def test_from_spoofing():
         print(f"Respuesta al PM suplantado: {response}")
         
         if response.get("error") == "from_spoofing_detected":
-            print("✅ Ataque detectado y bloqueado exitosamente!")
+            print(" Ataque detectado y bloqueado exitosamente!")
         else:
-            print("❌ Ataque no detectado - vulnerabilidad presente")
+            print(" Ataque no detectado - vulnerabilidad presente")
             
     except Exception as e:
         print(f"Error en test: {e}")
@@ -103,7 +103,7 @@ def test_registration_without_private_key():
         print(f"Respuesta de registro: {response}")
         
         if response.get("type") == "CHALLENGE":
-            print("✅ Challenge solicitado - intentando respuesta falsa...")
+            print(" Challenge solicitado - intentando respuesta falsa...")
             
             # Intentar responder con firma inválida
             send_json(sock, {
@@ -115,11 +115,11 @@ def test_registration_without_private_key():
             print(f"Respuesta al challenge: {response}")
             
             if response.get("error") == "invalid_signature":
-                print("✅ Firma inválida detectada - ataque bloqueado!")
+                print(" Firma inválida detectada - ataque bloqueado!")
             else:
-                print("❌ Firma inválida aceptada - vulnerabilidad presente")
+                print(" Firma inválida aceptada - vulnerabilidad presente")
         else:
-            print("❌ No se solicitó challenge - vulnerabilidad presente")
+            print(" No se solicitó challenge - vulnerabilidad presente")
             
     except Exception as e:
         print(f"Error en test: {e}")
@@ -160,9 +160,9 @@ def test_username_hijacking():
         print(f"Respuesta de hijacking: {response}")
         
         if response.get("error") == "username_taken":
-            print("✅ Intento de hijacking detectado y bloqueado!")
+            print("Intento de hijacking detectado y bloqueado!")
         else:
-            print("❌ Hijacking no detectado - vulnerabilidad presente")
+            print("Hijacking no detectado - vulnerabilidad presente")
             
     except Exception as e:
         print(f"Error en test: {e}")
@@ -186,7 +186,7 @@ def main():
     test_username_hijacking()
     
     print("\n" + "=" * 50)
-    print("🎯 Tests completados!")
+    print("Tests completados!")
     print("Si ves '✅' en todos los tests, las mejoras están funcionando correctamente.")
     print("Si ves '❌', hay vulnerabilidades que necesitan atención.")
 

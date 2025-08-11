@@ -3,6 +3,8 @@ import socket
 import threading
 import json
 import base64
+import time
+import secrets
 from pathlib import Path
 
 # cryptography library
@@ -79,6 +81,39 @@ def sign_challenge(private_key, challenge: str) -> str:
         hashes.SHA256()
     )
     return base64.b64encode(signature).decode()
+
+def sign_message(private_key, message_data: str) -> str:
+    """Sign message data with the private key using PSS padding"""
+    signature = private_key.sign(
+        message_data.encode(),
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.MAX_LENGTH
+        ),
+        hashes.SHA256()
+    )
+    return base64.b64encode(signature).decode()
+
+def create_signed_message_data(from_user: str, to_user: str, ciphertext_b64: str, nonce: str, timestamp: float) -> str:
+    """Create the canonical message data that gets signed (must match server)"""
+    return f"{from_user}|{to_user}|{ciphertext_b64}|{nonce}|{timestamp:.0f}"
+
+def verify_message_signature(public_key, message_data: str, signature_b64: str) -> bool:
+    """Verify a message signature"""
+    try:
+        signature = base64.b64decode(signature_b64)
+        public_key.verify(
+            signature,
+            message_data.encode(),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+        return True
+    except Exception:
+        return False
 
 class Keyring:
     def __init__(self, username: str):
@@ -223,14 +258,40 @@ def main():
             elif t == "PM":
                 sender = msg.get("from")
                 ct_b64 = msg.get("ciphertext_b64")
+                signature_b64 = msg.get("signature_b64")
+                nonce = msg.get("nonce")
+                timestamp = msg.get("timestamp")
+                verified = msg.get("verified", False)
+                
                 if not ct_b64:
                     continue
+                
+                # Verify message integrity if we have signature
+                integrity_check = "✅" if verified else "❓"
+                if signature_b64 and nonce and timestamp:
+                    # Get sender's public key to verify signature
+                    sender_pubkey = keyring.get_public_key(sender)
+                    if sender_pubkey:
+                        message_data = create_signed_message_data(sender, username, ct_b64, nonce, timestamp)
+                        if verify_message_signature(sender_pubkey, message_data, signature_b64):
+                            integrity_check = "✅ 🔐"
+                        else:
+                            integrity_check = "❌ 🚨"
+                            print(f"⚠️  [SECURITY] Firma inválida del mensaje de {sender}!")
+                    else:
+                        integrity_check = "❓ 🔑"
+                        print(f"⚠️  [SECURITY] No tengo la clave pública de {sender} para verificar")
+                
                 try:
                     ciphertext = base64.b64decode(ct_b64)
                     plaintext = decrypt_with(private_key, ciphertext)
-                    print(f"[PM de {sender}] {plaintext}")
+                    print(f"[PM de {sender}] {integrity_check} {plaintext}")
                 except Exception as e:
                     print(f"[PM de {sender}] <error al descifrar: {e}>")
+            elif t == "PM_ACK":
+                to_user = msg.get("to")
+                nonce = msg.get("nonce")
+                print(f"[entregado] ✅ Mensaje a {to_user} entregado y verificado por el servidor")
             elif t == "ERROR":
                 print(f"[error] {msg.get('error')} -> {msg}")
             else:
@@ -271,12 +332,27 @@ def main():
                     continue
 
                 ciphertext = encrypt_for(pubkey, text)
+                ciphertext_b64 = base64.b64encode(ciphertext).decode()
+                
+                # Create anti-replay protection
+                nonce = secrets.token_hex(16)  # 128-bit nonce
+                timestamp = time.time()
+                
+                # Create signed message data
+                message_data = create_signed_message_data(username, to, ciphertext_b64, nonce, timestamp)
+                signature_b64 = sign_message(private_key, message_data)
+                
+                print(f"[enviando] PM a {to} con firma e integridad...")
                 send_json(sock, {
                     "type": "PM",
                     "from": username,
                     "to": to,
                     "alg": "RSA-OAEP-SHA256",
-                    "ciphertext_b64": base64.b64encode(ciphertext).decode(),
+                    "ciphertext_b64": ciphertext_b64,
+                    "signature_b64": signature_b64,
+                    "nonce": nonce,
+                    "timestamp": timestamp,
+                    "sig_alg": "PSS-SHA256"
                 })
             elif line.startswith("/say "):
                 text = line[len("/say "):]
